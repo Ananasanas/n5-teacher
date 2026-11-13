@@ -109,6 +109,10 @@ body.noenglish .bub .en{display:none}
 .answer .in{display:flex;gap:8px}
 .answer input{flex:1;min-width:0;font:inherit;font-family:var(--jp);font-size:18px;border:1.5px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--surface);color:var(--fg)}
 .hint{background:var(--warm-soft);border-radius:14px;padding:10px 12px}
+.diff{display:flex;flex-direction:column;gap:6px;margin-top:8px;background:var(--surface);border-radius:12px;padding:8px 10px}
+.dline{font-family:var(--jp);font-size:20px;letter-spacing:.02em;overflow-wrap:anywhere}
+.d-ok{color:var(--fg)}.d-miss{color:var(--warm);text-decoration:underline;text-decoration-thickness:2px;font-weight:700}
+.d-extra{color:var(--bad);text-decoration:line-through;font-weight:700}
 /* kanji */
 .sets{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
 .kcard{display:grid;grid-template-columns:auto 1fr;gap:4px 16px;align-items:center}
@@ -433,7 +437,7 @@ function Talk() {
     return;
   }
   const name = page.dlg;
-  if (!talk || talk.name !== name || page.fresh !== false) { talk = { name, lines: D.dialogues[name], pos: 0, answered: 0, log: [], hint: false, done: false }; page.fresh = false; pushTeacher(); }
+  if (!talk || talk.name !== name || page.fresh !== false) { talk = { name, lines: D.dialogues[name], pos: 0, answered: 0, log: [], hint: false, done: false, wrong: false }; page.fresh = false; pushTeacher(); }
   setTop(esc(name), () => { talk = null; go("talk"); });
   renderTalk();
 }
@@ -460,9 +464,9 @@ function renderTalk() {
   h += `</div>`;
   if (!talk.done) {
     const ex = talk.lines[talk.pos].examples;
-    h += `<div class="answer">${talk.hint ? `<div class="hint"><b class="small">💬 You could answer:</b>${ex.map(e => exBlock(e[0], e[1], e[2], e[3])).join("")}</div>` : ""}
-      <form class="in" id="ansForm"><input id="ans" lang="ja" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="Answer in Japanese…" enterkeyhint="send"><button class="btn primary">Send</button></form>
-      <div class="row"><button class="btn" id="hintBtn" style="flex:1">${talk.hint ? "🙈 Hide hint" : "💡 Hint"}</button><button class="btn" id="skipBtn" style="flex:1">Skip ▶</button></div></div>`;
+    h += `<div class="answer">${talk.hint ? `<div class="hint"><b class="small">💬 You could answer:${ex.some(e => NAME_TEST.test(e[0])) ? " (use any name you like)" : ""}</b>${ex.map(e => exBlock(e[0], e[1], e[2], e[3])).join("")}</div>` : ""}
+      <form class="in" id="ansForm"><input id="ans" lang="ja" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="Answer in Japanese (or romaji)…" enterkeyhint="send"><button class="btn primary">Send</button></form>
+      <div class="row"><button class="btn" id="hintBtn" style="flex:1">${talk.hint ? "🙈 Hide hint" : "💡 Hint"}</button>${talk.wrong ? `<button class="btn good" id="contBtn" style="flex:1">Continue ▶</button>` : `<button class="btn" id="skipBtn" style="flex:1">Skip ▶</button>`}</div></div>`;
   } else {
     h += `<div class="row"><button class="btn primary" id="again" style="flex:1">↻ Practise again</button><button class="btn" id="other" style="flex:1">Other conversation</button></div>`;
   }
@@ -471,7 +475,8 @@ function renderTalk() {
   if (!talk.done) {
     $("#ansForm").onsubmit = e => { e.preventDefault(); const v = $("#ans").value.trim(); if (v) answer(v); };
     $("#hintBtn").onclick = () => { talk.hint = !talk.hint; renderTalk(); };
-    $("#skipBtn").onclick = () => { const e = talk.lines[talk.pos].examples[0]; talk.log.push({ k: "info", html: `Skipped. You could say: <span class="jp">${ruby(e[0])}</span> <span class="muted">(${esc(e[2])})</span>` }); talk.hint = false; talk.pos++; pushTeacher(); renderTalk(); };
+    $("#contBtn") && ($("#contBtn").onclick = continueAfterMistake);
+    $("#skipBtn") && ($("#skipBtn").onclick = () => { const e = talk.lines[talk.pos].examples[0]; talk.log.push({ k: "info", html: `Skipped. You could say: <span class="jp">${ruby(e[0])}</span> <span class="muted">(${esc(e[2])})</span>` }); talk.hint = false; talk.pos++; pushTeacher(); renderTalk(); });
   } else {
     $("#again").onclick = () => { talk = null; go("talk", { dlg: page.dlg }); };
     $("#other").onclick = () => { talk = null; go("talk"); };
@@ -479,21 +484,77 @@ function renderTalk() {
   const chat = $("#chat"); if (chat.lastElementChild) chat.lastElementChild.scrollIntoView({ block: "nearest" });
   window.scrollTo(0, document.body.scrollHeight);
 }
+/* Answer checking: accepts kanji, hiragana, katakana or romaji, and any name in place of the example name. */
+const toHira = s => s.replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
+const NAME_RE = /アンッティ|アンティ|あんってぃ|あんてぃ|antti|anti/gi;
+const NAME_TEST = /アンッティ|アンティ|あんってぃ|あんてぃ|antti/i;
+const KATA_RUN = /[ァ-ヶー]{2,}/g, LATIN_RUN = /[a-z][a-z'-]*/g;
+function answerForms(text) {
+  const n = norm(text);
+  const latin = /^[a-z'\-]+$/.test(n);
+  return { raw: n, hira: toHira(n), noName: toHira(n.replace(KATA_RUN, "").replace(latin ? /^$/ : LATIN_RUN, "")), latin };
+}
+function exampleForms(ex) {
+  const jp = norm(ex[0]), kana = norm(ex[1]), rom = norm(ex[2]).replace(/[^a-z]/g, "");
+  const hasName = NAME_TEST.test(ex[0] + ex[1]);
+  return { jp, kana: toHira(kana), rom, hasName,
+    jpNoName: toHira(jp.replace(KATA_RUN, "")), kanaNoName: toHira(kana.replace(KATA_RUN, "")), romNoName: rom.replace(NAME_RE, "") };
+}
+function scoreAnswer(text, examples) {
+  const u = answerForms(text);
+  let best = { score: 0, ex: examples[0], mine: u.raw, target: norm(examples[0][0]) };
+  for (const ex of examples) {
+    const f = exampleForms(ex);
+    const tries = u.latin
+      ? [[u.raw.replace(/[^a-z]/g, ""), f.rom], ...(f.hasName ? [[u.raw.replace(/[^a-z]/g, ""), f.romNoName]] : [])]
+      : [[u.raw, f.jp], [u.hira, f.kana], [u.hira, toHira(f.jp)], ...(f.hasName ? [[u.noName, f.jpNoName], [u.noName, f.kanaNoName]] : [])];
+    for (const [mine, target] of tries) {
+      let sc = ratio(mine, target);
+      if (f.hasName && target.length && (target === f.jpNoName || target === f.kanaNoName || target === f.romNoName)) {
+        // the name was removed from both sides: any name is fine, so judge only the rest
+        sc = ratio(mine, target);
+      }
+      if (sc > best.score) best = { score: sc, ex, mine, target };
+    }
+  }
+  return best;
+}
+function diffHtml(mine, target) {
+  // character diff: green = right, red strike = not needed, orange underline = missing
+  const a = [...mine], b = [...target], n = a.length, m = b.length;
+  const L = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i+1][j+1] + 1 : Math.max(L[i+1][j], L[i][j+1]);
+  let i = 0, j = 0, you = "", fix = "";
+  while (i < n || j < m) {
+    if (i < n && j < m && a[i] === b[j]) { you += `<span class="d-ok">${esc(a[i])}</span>`; fix += `<span class="d-ok">${esc(b[j])}</span>`; i++; j++; }
+    else if (j < m && (i >= n || L[i][j+1] >= L[i+1][j])) { fix += `<span class="d-miss">${esc(b[j])}</span>`; j++; }
+    else { you += `<span class="d-extra">${esc(a[i])}</span>`; i++; }
+  }
+  return { you, fix };
+}
 function answer(text) {
   const l = talk.lines[talk.pos];
   talk.log.push({ k: "u", text });
-  const said = norm(text);
-  const sim = Math.max(...l.examples.map(e => ratio(said, norm(e[0]))), ...l.examples.map(e => ratio(said, norm(e[1]))));
-  const key = l.keys.some(k => said.includes(norm(k)));
-  if (sim >= 0.6 || key) {
-    const best = l.examples[0];
-    talk.log.push({ k: "ok", html: `${sim >= 0.8 ? "✅ すばらしい！ Perfect answer!" : "✅ いいですね！ Good answer!"}<details><summary>Another way to say it</summary>${exBlock(...rnd(l.examples))}</details>` });
-    talk.answered++; talk.pos++; talk.hint = false; pushTeacher();
+  const best = scoreAnswer(text, l.examples);
+  const keyHit = l.keys.some(k => { const nk = norm(k); return nk.length >= 3 && best.score >= 0.35 && !NAME_TEST.test(nk) && (norm(text).includes(nk) || toHira(norm(text)).includes(toHira(nk))); });
+  const d = diffHtml(best.mine, best.target);
+  const showDiff = best.score < 0.999 && best.mine !== best.target;
+  const compare = `<div class="diff"><div><span class="small muted">You wrote</span><div class="dline">${d.you || "&nbsp;"}</div></div>
+    <div><span class="small muted">Closest example</span><div class="dline">${d.fix}</div></div>
+    <div class="small muted"><span class="d-miss">orange</span> = missing · <span class="d-extra">red</span> = not needed${best.ex && NAME_TEST.test(best.ex[0]) ? " · any name is fine" : ""}</div></div>`;
+  if (best.score >= 0.6 || keyHit) {
+    talk.log.push({ k: "ok", html: `${best.score >= 0.85 ? "✅ すばらしい！ Great answer!" : "✅ いいですね！ Good answer!"}${showDiff && best.score < 0.85 ? compare : ""}<details><summary>Another way to say it</summary>${exBlock(...rnd(l.examples))}</details>` });
+    talk.answered++; talk.pos++; talk.hint = false; talk.wrong = false; pushTeacher();
   } else {
-    talk.log.push({ k: "no", text: "🤔 Hmm, that doesn't quite fit. Try again, or tap 💡 Hint." });
+    talk.log.push({ k: "no", html: `🤔 Not quite. Here is what was different:${compare}` });
+    talk.hint = true; talk.wrong = true;
   }
   renderTalk();
-  if (!talk.done) setTimeout(() => { const i = $("#ans"); if (i) i.focus(); }, 50);
+  if (!talk.done) setTimeout(() => { const i = $("#ans"); if (i) i.focus({ preventScroll: true }); }, 50);
+}
+function continueAfterMistake() {
+  talk.log.push({ k: "info", text: "▶ Moving on. This one will come back next time." });
+  talk.answered++; talk.pos++; talk.hint = false; talk.wrong = false; pushTeacher(); renderTalk();
 }
 
 /* ================= KANJI ================= */
